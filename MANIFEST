@@ -2,5 +2,8 @@ Changes
 Fork.pm
 MANIFEST
 Makefile.PL
-test.pl
 INSTALL
+t/Fork.t
+t/test.html
+t/test1.html
+t/test2.html

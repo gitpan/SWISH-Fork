@@ -1,16 +1,20 @@
 package SWISH::Fork;
 use strict;
 
-use vars (qw/$VERSION $errstr @ISA $AUTOLOAD/);
+use vars (qw/$VERSION $errstr @ISA $AUTOLOAD $DEBUG/);
+
 
 # Plan to change to %FIELDS
 use base qw/SWISH/;
 
-use Symbol;     # For creating a locallized file handle
-use Sys::Signal ();  # for mod_perl
+use Symbol;          # For creating a locallized file handle
+#use Sys::Signal ();  # For mod_perl
+use IO::Handle;      # for flushing 
 
+# $Id: Fork.pm,v 1.13 2001/03/26 02:16:27 lii Exp $
 
-$VERSION = 0.08;
+$VERSION = '0.12';
+
 
 {
     my %available = (
@@ -18,23 +22,42 @@ $VERSION = 0.08;
         indexes     => 1,       # Not writable?
         query       => 1,
         tags        => 1,       # Alias content?
-        properites  => 1,
+        properties  => 1,
         maxhits     => 1,
         startnum    => 1,
-        sort        => 1,
+        sortorder   => 1,
         start_date  => 1,
         end_date    => 1,
         results     => 1,
         headers     => 1,
         timeout     => 1,
+        version     => 1,
         errstr      => 0,
         rawline     => 0,   # as read from pipe
-        indexheaders => 0,
     );
     sub _readable{ exists $available{$_[1]} };
     sub _writable{ $available{$_[1]} };
 }
-        
+
+my @default_x_fields = qw/
+    swishrank
+    swishdocpath
+    swishtitle
+    swishlastmodified
+    swishdescription
+    swishstartpos
+    swishdocsize
+    swishdbfile
+    swishreccount
+/;
+
+my @fields_pre_21 = qw/
+    swishrank
+    swishdocpath
+    swishtitle
+    swishdocsize
+/;
+
 
 #------------- public methods -------------------------
 
@@ -56,6 +79,12 @@ sub new {
     unless ( -x $attr{prog} ) {
         $errstr = "Swish binary '$attr{prog}' not executable: $!";
         return;
+    }
+
+    unless ( $attr{version} ) {
+        my $version = `$attr{prog} -V`;
+        $version =~ tr/[0-9].//cd;
+        $attr{version} = $version if $version;
     }
 
 
@@ -111,20 +140,99 @@ sub query {
         return;
     }
 
+
+
+    # Set default version.
+    $settings{version} = 1.3 unless $settings{version} && $settings{version} =~ /^[\d.]+/;
+
     # This may cause problems if using -d or even both.
     $settings{output_separator} ||= '::';
+
+    $settings{output_separator} = '' if $settings{version} < 1.3;
     
 
     my @parameters;
 
     push @parameters, '-w', $settings{query},
-                      '-f', @indexes,
-                      '-d', $settings{output_separator};
+                      '-f', @indexes;
 
-                      
+
+    push @parameters,  '-d', $settings{output_separator} if $settings{output_separator};
+
+
+
+    my @properties;
+    if ( $settings{properties} ) {
+        @properties = ref $settings{properties} ? @{$settings{properties}} : ($settings{properties});
+    }
+
+
+    if ( $settings{version} >= 2.120 ) {
+
+        $settings{-H} ||= 4;  # enable extended headers unless set otherwise
+
+        my $fields;
+        my $format;
+
+        if ( $settings{output_format} ) {
+
+            unless ( ref $settings{output_format} eq 'HASH' ) {
+                $self->errstr( q['output_format' must be a hash reference] );
+                return;
+            }
+            unless ( $settings{output_format}{FIELDS} && ref $settings{output_format}{FIELDS} eq 'ARRAY' ) {
+                $self->errstr( q['output_format' must have a 'FIELDS' key and be an ARRAY reference] );
+                return;
+            }
+            unless ( @{ $settings{output_format}{FIELDS} } ) {
+                $self->errstr( q['output_format FIELDS' must not be an empty array] );
+                return;
+            }
+            unless ( $settings{output_format}{FORMAT} && ref $settings{output_format}{FORMAT} eq 'HASH' ) {
+                $self->errstr( q['output_format' must have a 'FORMAT' key and be an HASH reference] );
+                return;
+            }
+
+            $fields = $settings{output_format}{FIELDS};
+            $format = $settings{output_format}{FORMAT};
+
+        } elsif ( $settings{-x} ) {   # customer supplied format -- they are on their own!
+
+            $settings{-x} = "0$settings{output_separator}$settings{-x}";
+
+        } else { # otherwise supply our own fields
+
+            $fields = [@default_x_fields, @properties];
+            $format = {};
+        }
+
+        # Set the format field
+
+        if ( $fields ) {
+            $settings{-x} =
+                join ( $settings{output_separator},
+                    '0',  # place a digit first to can find results
+                    map {
+                        $format->{$_}
+                            ? "<$_ fmt='$format->{$_}'>"
+                            : "<$_>"
+                        } @$fields
+                    ) . '\n';
+
+            $settings{_fields} = $fields;
+        }
+
+    } else { # not >= 2.120
+
+        delete $settings{-x} if exists $settings{-x};
+        $settings{_fields} = \@fields_pre_21;
+        push @{ $settings{_fields} }, @properties if @properties;
+    }
+    
 
     # add other settings to parameters
     push @parameters, _add_options( \%settings );
+
 
 
     return $self->_fork_swish( \%settings, \@parameters );
@@ -150,12 +258,13 @@ sub abort_query {
 
 #-------------- private methods -----------------------
 
+# This takes the settings and returns an array of option switches that is passed to swish.
 sub _add_options {
     my $settings = shift;
 
     my %map = (
         properties  => '-p',
-        sort        => '-s',
+        sortorder   => '-s',
         maxhits     => '-m',
         tags        => '-t',
         context     => '-t',
@@ -177,7 +286,7 @@ sub _add_options {
         push @options, ref $settings->{$option}
                        ? @{$settings->{$option}}
                        : $settings->{$option}
-                           if $settings->{$option};
+                           if defined $settings->{$option};
 
         # Need to consider if someone uses -d instead of output_seperator                           
 
@@ -186,13 +295,49 @@ sub _add_options {
     return @options;
 }    
 
-            
+
+# Win 32 version            
+sub _pipe_swish {
+
+    my ( $self, $settings, $params ) = @_;
+    my $fh = gensym;
+
+    STDOUT->flush;  # flush STDOUT STDERR
+    STDERR->flush;  # so child doesn't get copies
+
+    $self->{_start_time} = time;
+    $self->{_handle}     = $fh;
+    delete $self->{_abort};
+
+    my $cmd = join ' ', $self->{prog}, map { qq["$_"] } @$params;
+
+    warn "$$ piped open: '$cmd'\n" if $DEBUG;
+
+    $cmd = $1 if $cmd =~ /^(.+)$/;  # Blindly untaint on w32
+
+    unless ( open $fh, "$cmd|" ) {
+        $self->errstr( "Failed to run '$self->{prog}': '$!'" );
+        return;
+    }
+
+    my $hits = $self->_read_results( $settings );
+
+    unless ( close $fh ) {
+        $self->errstr( "Failed to close '$self->{prog}': '$!' '$?'");
+        return;
+    }
+
+    return $hits;
+}
+
 
     
 
-use IO::Handle;
 
 sub _fork_swish {
+
+    return &_pipe_swish if $^O =~ /win/i;
+
     my ( $self, $settings, $params ) = @_;
 
     my $fh = gensym;
@@ -210,10 +355,13 @@ sub _fork_swish {
         return;
     }
 
+    warn "$$ exec: " . join(' ', $self->{prog}, @$params ) . "\n" if $DEBUG && $child;
 
     # this is in the child
     exec( $self->{prog}, @$params ) || die "failed to exec '$self->{prog}' $!"
         unless $child;
+
+
 
     
     $self->{_start_time} = time;
@@ -224,14 +372,26 @@ sub _fork_swish {
     my $hits;
 
 
+
     # Use Sys::Signal under mod_perl to restore Apache's signal handler
     # Should be fixed under perl 5.6.1, but check with mod_perl list to be sure.
 
     eval {
-        local $SIG{__DIE__};
+        my $h;
+
+        local $SIG{ALRM};
+        
         if ( $settings->{timeout} && $settings->{timeout} =~ /\d+/ ) {
-            #$SIG{ALRM} = sub { die "Timeout after $settings->{timeout} seconds\n" };
-            my $h = Sys::Signal->set(ALRM => sub { die "Timeout after $settings->{timeout} seconds\n" });
+
+            # Load Sys/Signal if available.
+
+            eval { require 'Sys/Signal.pm' };
+            if ( $@ ) {
+                $SIG{ALRM} = sub { die "Timeout after $settings->{timeout} seconds\n" };
+            } else {
+                $h = Sys::Signal->set(ALRM => sub { die "Timeout after $settings->{timeout} seconds\n" });
+            }
+
             alarm $settings->{timeout};
         }
         $hits = $self->_read_results( $settings );
@@ -244,6 +404,7 @@ sub _fork_swish {
         delete $self->{total_hits} if $self->{total_hits};
     }
 
+    # xxx what to do with failed close here?
     close( $self->{_handle} );
     delete $self->{_handle};
     delete $self->{_child};
@@ -258,38 +419,92 @@ sub _fork_swish {
 sub _read_results {
     my ( $self, $settings ) = @_;
 
-    my %headers;
-    my $header_done;
     my $error;
     my $eof;
+
+    my $current_index_file;  # for multiple headers with -x under >= 2.1
 
 
     # Should these be method calls?
     $self->{cur_record} = 0;
     $self->{total_hits} = 0;
 
-    delete $self->{indexheaders} if $self->{indexheaders};
+    my %headers;
+    $self->{_indexheaders} = \%headers;
 
 
+    # Set fields to grab
+    
 
     my $fh = $self->{_handle};
 
+    local $/ = "\n";  # just in case
+
     while (my $line = <$fh> ) {
 
-
+    	warn ">$line" if $DEBUG;
 
         # a way to exit;
         die (( $self->{_abort} || 'aborted') . "\n") if exists $self->{_abort};
 
-        chomp $line;
+
+  
+        if ( $line =~ /^\d/ ) {  # assume it's a result
+
+            $line = $1 if $line =~ /^0\Q$settings->{output_separator}\E(.+)$/;
+
+            # If no fields specified (this would be because -x was defined by the customer)
+
+            unless ( $settings->{_fields} ) {
+                $settings->{results}->( $self, $line  );
+                next;
+            }
+            
+            chomp $line;
+
+            # Raw output
+            if ( $self->{_raw} ) {
+                push @{$self->{_raw}}, $line;
+                next;
+            }
+
+
+            $self->{rawline} = $line;    # chomped version
+            
+            $self->{cur_record}++;       # this record
+            my %result;
+
+            if (  $settings->{output_separator} ) {
+                @result{ @{ $settings->{_fields} } } = split /\Q$settings->{output_separator}/, $line;
+
+            } else {
+                ( @result{ @{ $settings->{_fields} } } ) = $line =~ /^(\d+)\s+([^\s]+)\s+"(.+)"\s+(\d+)$/;
+
+            }
+
+            $result{_settings}  = $settings;                        # so can get a list of the property names passed
+            $result{swishreccount}  ||= $self->{cur_record};        # Just in case not set
+            $result{total_hits} = $headers{'number of hits'}->[0] || 0;  # doesn't work with multiple indexes up to 2.0
+
+
+
+            my $result = SWISH::Results->new( \%result );                
+
+
+            $settings->{results}->( $self, $result  );
+
+            next;
+        }
+        
+
+
+        chomp $line; 
 
         # Raw output
         if ( $self->{_raw} ) {
             push @{$self->{_raw}}, $line;
             next;
         }
-
-        
 
         $self->{rawline} = $line;
 
@@ -298,54 +513,28 @@ sub _read_results {
         if ( $line =~ /^#/ ) {
             if ( $line =~ /^# ([^:]+):\s+(.+)$/ ) {
                 my ( $name, $value ) = ( lc($1), $2 );
-                $headers{$name} = $value;
+
+                push @{$headers{ $name }}, $value;  # Save the value
+
+                # As of 2.1-dev-19 swish can (with -H) return a different set of headers for every index file
+                $current_index_file = $value if $name eq 'index file';
+
+                my $cur_index = $current_index_file
+                    unless $name =~ /^(?:number of hits|run time|search time)/;
+
+                push @{$headers{INDEX}{$cur_index}{$name}}, $value
+                    if $cur_index;
+                
+
+                # Call callback for each header, passing the index file, too, if any.
             
-                $settings->{headers}->( $self, $name, $value )
+                $settings->{headers}->( $self, $name, $value, $cur_index )
                     if $settings->{headers} && ref($settings->{headers}) eq 'CODE';
+
             }
 
             next;
         }
-        
-
-        # If not a header, then save previous set of headers
-        if ( %headers ) {
-            $self->{total_hits} += $headers{'Number of hits'} if $headers{'Number of hits'};
-
-            push @{$self->{indexheaders}}, {%headers};
-            %headers = ();
-        }
-
-
-        if ( $line =~ /^\d/ ) {          # Starts with a digit then assume it's a result
-
-
-            $self->{cur_record}++;       # this record
-
-
-            my ( $score, $file, $title, $size, @properties ) =
-                split /$settings->{output_separator}/, $line;
-
-
-            my %result = (
-                score       => $score,
-                file        => $file,
-                title       => $title,
-                size        => $size,
-                position    => $self->{cur_record},
-                total_hits  => $self->{total_hits},     # doesn't work with multiple indexes
-            );
-
-            $result{properties} = \@properties if @properties;
-
-            my $result = SWISH::Results->new( \%result );                
-
-
-            $settings->{results}->( $self, $result );
-
-            next;
-        }
-
 
 
         # Catch errors, but not 'no results' since could be more than one index
@@ -358,14 +547,6 @@ sub _read_results {
         # Should check for unexpected data here.
     }
 
-    # Save the current headers.
-    if ( %headers ) {
-        $self->{total_hits} += $headers{'Number of hits'} if $headers{'Number of hits'};
-
-        push @{$self->{indexheaders}}, {%headers};
-        %headers = ();
-    }
-
 
 
     if ( $error && $error ne 'no results' ) {
@@ -374,12 +555,14 @@ sub _read_results {
         return;
     }
 
+
     return $self->{cur_record} if $self->{cur_record} && $eof;
 
     $self->errstr('Failed to find results') if $eof;
     $self->errstr('Failed to find end of results') unless $eof;
     return;
 }
+
 
 
 sub DESTROY {
@@ -395,10 +578,10 @@ sub AUTOLOAD {
     die "failed to find attribute in autoload '$AUTOLOAD'" unless $attribute;
 
 
-    return unless $self->_readable( $attribute );
+    die "Method '$attribute' not available"
+        unless $self->_readable( $attribute );
 
     if ( $self->_writable( $attribute ) ) {
-
         *{$AUTOLOAD} = sub {
             my $me = shift;
 
@@ -409,6 +592,8 @@ sub AUTOLOAD {
 
             return $me->{$attribute} || undef;
         };
+
+
     } else {
         *{$AUTOLOAD} = sub {
             return shift->{$attribute} || undef;
@@ -445,14 +630,43 @@ SWISH::Fork - Perl extension for accessing the SWISH-E search engine via a fork/
 This module is a driver for the SWISH search engine using the forked access method.
 Please see L<SWISH> for usage instructions.
 
+This module has been tested with the following versions of SWISH-E
+
+    1.2.4
+    1.3.2
+    2.0.4
+    2.1 (pre 2.2 development version)
+
 
 =head2 REQUIRED MODULES
 
-SWISH - the front-end for module for accessing the SWISH search engine.
+The following module is required (and needs to be installed before installing this module.
 
-Sys::Signal - Use instead of C<local $SIG{ALRM}> to restore signal handlers.  Should be fixed in Perl 5.6.1
+    SWISH - the front-end for module for accessing the SWISH search engine.
 
-Symbol - localized file handles (standard module)
+These modules are required, but are standard.
+
+    Symbol - localized file handles (standard module)
+
+    IO::Handle - For flushing buffers
+
+This module is not required, but *should* be installed when running under mod_perl or any situation
+where a C signal handler must be restored.  (Under mod_perl we need to restore Apache's SIGALRM handler.)
+The module will only be used if installed, otherwise will fall back to $SIG{ALRM}.
+
+    Sys::Signal - Use instead of C<local $SIG{ALRM}> to restore signal handlers.
+    Should be fixed in Perl 5.6.1, but check with the mod_perl list.
+
+=head1 RUNNING UNDER Win32
+
+This module will run under Windows, but uses a piped open to run Swish, and does not offer
+timeout support.
+In addition, parameters passed to swish are B<blindly> untainted -- shell escapes are not removed.
+All parameters are placed in double-quotes when running under Win32.  Please let me know if there's
+a better way under Win32.
+
+It is recommended that the security issues of running CGI scripts under Windows be
+carefully considered.
 
 
 =head1 AUTHOR
