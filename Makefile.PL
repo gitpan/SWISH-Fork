@@ -65,6 +65,7 @@ sub set_swish_version {
         } else {
             $version = `$enter -V`;
             $version =~ tr/[0-9].//cd;
+            $version = do { my @v=split('\.', $version ); sprintf "%d." . "%03d"x$#v,@v };
             
             if ( $version ) {
                 print "Your SWISH-E version: $version\n";

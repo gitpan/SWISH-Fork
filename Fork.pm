@@ -13,7 +13,7 @@ use IO::Handle;      # for flushing
 
 # $Id: Fork.pm,v 1.13 2001/03/26 02:16:27 lii Exp $
 
-$VERSION = '0.12';
+$VERSION = '0.13';
 
 
 {
@@ -84,6 +84,7 @@ sub new {
     unless ( $attr{version} ) {
         my $version = `$attr{prog} -V`;
         $version =~ tr/[0-9].//cd;
+        $version = do { my @v=split('\.', $version ); sprintf "%d." . "%03d"x$#v,@v };
         $attr{version} = $version if $version;
     }
 
@@ -143,12 +144,12 @@ sub query {
 
 
     # Set default version.
-    $settings{version} = 1.3 unless $settings{version} && $settings{version} =~ /^[\d.]+/;
+    $settings{version} = 1.003 unless $settings{version} && $settings{version} =~ /^[\d.]+/;
 
     # This may cause problems if using -d or even both.
     $settings{output_separator} ||= '::';
 
-    $settings{output_separator} = '' if $settings{version} < 1.3;
+    $settings{output_separator} = '' if $settings{version} < 1.003;
     
 
     my @parameters;
@@ -167,7 +168,7 @@ sub query {
     }
 
 
-    if ( $settings{version} >= 2.120 ) {
+    if ( $settings{version} >= 2.00120 ) {
 
         $settings{-H} ||= 4;  # enable extended headers unless set otherwise
 
@@ -637,6 +638,9 @@ This module has been tested with the following versions of SWISH-E
     2.0.4
     2.1 (pre 2.2 development version)
 
+B<NOTE:> This module is now depreciated.  Use the SWISH::API module instead.
+SWISH::API is bundled with Swish-e version 2.4.0, but will soon be available
+from the CPAN.  SWISH::API is an xs interface to the Swish-e library.
 
 =head2 REQUIRED MODULES
 

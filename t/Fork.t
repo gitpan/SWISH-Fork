@@ -73,9 +73,9 @@ use SWISH;
             ?  "ok Header 'WordCharacters'\n" 
             : "not ok Header 'WordCharacters'\n";
     } else {
-        print $sh->get_header( 'Counts' )
-            ?  "ok Header 'Counts'\n" 
-            : "not ok Header 'Counts'\n";
+        print $sh->get_header( 'Total Words' )
+            ?  "ok Header 'Total Words'\n" 
+            : "not ok Header 'Total Words'\n";
     }
 
     
